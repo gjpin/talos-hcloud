@@ -1,0 +1,22 @@
+[
+    {
+        "op": "add",
+        "path": "/cluster/network/cni",
+        "value": {
+            "name": "custom",
+            "urls": [
+                "https://projectcalico.docs.tigera.io/archive/CALICO_VERSION/manifests/tigera-operator.yaml"
+            ]
+        }
+    },
+    {
+        "op": "add",
+        "path": "/cluster/inlineManifests",
+        "value": [
+            {
+                "name": "calico",
+                "contents": "apiVersion: operator.tigera.io/v1\nkind: Installation\nmetadata:\n  name: default\nspec:\n  calicoNetwork:\n    bgp: Disabled\n    ipPools:\n    - blockSize: 26\n      cidr: 10.244.0.0/16\n      encapsulation: VXLANCrossSubnet\n      natOutgoing: Enabled\n      nodeSelector: all()\n---\napiVersion: operator.tigera.io/v1\nkind: APIServer\nmetadata:\n  name: default\nspec: {}\n"
+            }
+        ]
+    }
+]

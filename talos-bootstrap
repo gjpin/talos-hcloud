@@ -1,0 +1,579 @@
+#!/bin/bash
+set -eu -o pipefail
+
+# Talos OS and extensions versions
+TALOS_VERSION="v1.0.5" # https://github.com/siderolabs/talos
+GVISOR_VERSION="20220405.0-v1.0.0-7-ge0b1465" # https://github.com/siderolabs/extensions/pkgs/container/gvisor
+
+# Helm versions
+METALLB_HELM_VERSION="0.12.1" # https://artifacthub.io/packages/helm/metallb/metallb
+NGINX_INGRESS_HELM_VERSION="4.1.3" # https://artifacthub.io/packages/helm/ingress-nginx/ingress-nginx
+METRICS_SERVER_HELM_VERSION="3.8.2" # https://artifacthub.io/packages/helm/metrics-server/metrics-server
+KUBERNETES_DASHBOARD_HELM_VERSION="5.4.1" # https://artifacthub.io/packages/helm/k8s-dashboard/kubernetes-dashboard
+PROMETHEUS_HELM_VERSION="15.9.0" # https://artifacthub.io/packages/helm/prometheus-community/prometheus
+GRAFANA_HELM_VERSION="6.29.5" # https://artifacthub.io/packages/helm/grafana/grafana
+CERT_MANAGER_HELM_VERSION="1.8.0" # https://artifacthub.io/packages/helm/cert-manager/cert-manager
+KEDA_HELM_VERSION="2.7.2" # https://artifacthub.io/packages/helm/kedacore/keda
+
+# Other resources versions
+CALICO_VERSION="v3.23" # https://projectcalico.docs.tigera.io/reference/installation/api
+CLUSTER_AUTOSCALER_VERSION="v1.23.0" # https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler
+HETZNER_CSI_DRIVER_VERSION="v1.6.0" # https://github.com/hetznercloud/csi-driver
+EXTERNAL_DNS_VERSION="v0.12.0" # https://github.com/kubernetes-sigs/external-dns
+
+# Flags
+cni=""
+destroy="false"
+
+print_usage() {
+cat << EOF
+Usage: talos-bootstrap
+
+    -d to destroy the cluster (defaults to false)
+EOF
+}
+
+while getopts 'd' flag; do
+  case "${flag}" in
+    d) destroy="true" ;;
+    *) print_usage
+       exit 1 ;;
+  esac
+done
+
+get_talos_image_id() {
+    # Get Talos image ID based on label selectors
+    curl --no-progress-meter -H "Authorization: Bearer $HCLOUD_TOKEN" \
+        "https://api.hetzner.cloud/v1/images?label_selector=os=talos&label_selector=version=${TALOS_VERSION}" | jq -r .images[].id
+}
+
+create_talos_image_if_not_exists() {
+    echo -e "\nCreating custom Talos image.\n"
+
+    # if image exists, return
+    if [ "$(get_talos_image_id)" != "" ]; then
+        echo -e "\nTalos image with specified version already exists. Skipping image creation.\n"
+        return 0
+    fi
+
+    # Create the image with packer
+    packer init packer/talos-hcloud.pkr.hcl &> /dev/null
+
+    packer build \
+        -var talos_version=${TALOS_VERSION} \
+        packer/talos-hcloud.pkr.hcl &> /dev/null
+}
+
+create_terraform_resources(){
+    echo -e "\nCreating Terraform resources (nodes, load balancer, DNS records).\n"
+
+    # Create nodes, load balancers and DNS records
+    terraform -chdir=./terraform apply \
+        -auto-approve \
+        -var talos_image_id=$(get_talos_image_id) \
+        -var base_domain=${BASE_DOMAIN} \
+        -var cloudflare_dns_zone_id=${CLOUDFLARE_ZONE_ID} &> /dev/null
+
+    # Wait for Talos to finish booting
+    echo -e "\nWaiting for Talos to finish booting.\n"
+    sleep 60s
+}
+
+create_machine_configuration_files(){
+    echo -e "\nCreating machine configuration files.\n"
+
+    # Create machine configuration files
+    talosctl gen config ${CLUSTER_NAME} https://api.${CLUSTER_NAME}.${BASE_DOMAIN}:6443 \
+        --config-patch "$(cat resources/talos-patches/set-control-plane-endpoint.json | sed "s|CONTROL_PLANE_ENDPOINT|https://api.${CLUSTER_NAME}.${BASE_DOMAIN}:6443|")" \
+        --config-patch-control-plane "$(cat resources/talos-patches/enable-calico.json | sed "s|CALICO_VERSION|${CALICO_VERSION}|")" \
+        --config-patch @resources/talos-patches/set-nameservers.json \
+        --config-patch @resources/talos-patches/rotate-server-certificates.json \
+        --config-patch-worker "$(cat resources/talos-patches/install-gvisor-extension.json | sed "s|GVISOR_VERSION|${GVISOR_VERSION}|")" \
+        --with-docs=false \
+        --with-examples=false \
+        --with-cluster-discovery \
+        --output-dir=terraform/generated-files &> /dev/null
+}
+
+bootstrap_talos(){
+    echo -e "\nBootstrapping Talos cluster.\n"
+
+    CONTROL_PLANE_NODE_0_IP=$(terraform -chdir=./terraform output -raw control_plane_node_0_ip)
+
+    # Bootstrap the etcd cluster on the first control plane node
+    talosctl config endpoint ${CONTROL_PLANE_NODE_0_IP} \
+        --talosconfig terraform/generated-files/talosconfig
+
+    talosctl config node ${CONTROL_PLANE_NODE_0_IP} \
+        --talosconfig terraform/generated-files/talosconfig
+
+    talosctl bootstrap \
+        --talosconfig=terraform/generated-files/talosconfig
+
+    # Download the admin kubeconfig from the first control plane node
+    talosctl kubeconfig terraform/generated-files \
+        --talosconfig=terraform/generated-files/talosconfig \
+        --merge=false
+}
+
+install_metrics_server(){
+    echo -e "\nInstalling metrics server.\n"
+
+    # Install Kubelet Serving Certificate Approver
+    # https://github.com/alex1989hu/kubelet-serving-cert-approver
+    kubectl apply -f https://raw.githubusercontent.com/alex1989hu/kubelet-serving-cert-approver/main/deploy/standalone-install.yaml &> /dev/null
+
+    # Wait till Kubelet serving certificate approver pods are ready
+    wait_for_pods_ready "--namespace=kubelet-serving-cert-approver"
+
+    # Add metrics server chart repository
+    helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ &> /dev/null
+    helm repo update &> /dev/null
+
+    # Install metrics server
+    helm install metrics-server metrics-server/metrics-server \
+        --version ${METRICS_SERVER_HELM_VERSION} \
+        --create-namespace \
+        --namespace metrics-server &> /dev/null
+
+    # Wait till metrics server pods are ready
+    wait_for_pods_ready "--namespace=metrics-server"
+}
+
+install_prometheus(){
+    echo -e "\nInstalling Prometheus.\n"
+
+    # Add Prometheus chart repository
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts &> /dev/null
+    helm repo update &> /dev/null
+
+    # Install Prometheus
+    helm install prometheus prometheus-community/prometheus \
+        --version ${PROMETHEUS_HELM_VERSION} \
+        --create-namespace \
+        --namespace prometheus &> /dev/null
+
+    # Wait till Prometheus pods are ready
+    wait_for_pods_ready "--namespace=prometheus"
+}
+
+install_grafana(){
+    echo -e "\nInstalling Grafana.\n"
+
+    # Add Grafana chart repository
+    helm repo add grafana https://grafana.github.io/helm-charts &> /dev/null
+    helm repo update &> /dev/null
+
+    # Install Grafana
+    helm install grafana grafana/grafana \
+        --version ${GRAFANA_HELM_VERSION} \
+        --create-namespace \
+        --namespace grafana \
+        -f - <<EOF
+persistence:
+    enabled: true
+    type: "pvc"
+    size: "10Gi"
+grafana.ini:
+  server:
+    domain: grafana.monitoring.${BASE_DOMAIN}
+    root_url: "%(protocol)s://%(domain)s/"
+    serve_from_sub_path: false
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    external-dns.alpha.kubernetes.io/hostname: "grafana.monitoring.${BASE_DOMAIN}"
+    external-dns.alpha.kubernetes.io/ttl: "120"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+  path: "/"
+  pathType: Prefix
+  hosts:
+    - "grafana.monitoring.${BASE_DOMAIN}"
+  tls:
+  - hosts:
+    - "grafana.monitoring.${BASE_DOMAIN}"
+    secretName: grafana-tls
+admin:
+  passwordKey: "${GRAFANA_ADMIN_PASSWORD}"
+datasources:
+  [{"id":1,"uid":"GYgbZY97z","orgId":1,"name":"Prometheus","type":"prometheus","typeName":"Prometheus","typeLogoUrl":"public/app/plugins/datasource/prometheus/img/prometheus_logo.svg","access":"proxy","url":"http://prometheus-server.prometheus","password":"","user":"","database":"","basicAuth":false,"isDefault":true,"jsonData":{"httpMethod":"POST"},"readOnly":false}]
+dashboards:
+  default:
+    ingress-nginx:
+      json: |
+        $(cat resources/grafana/ingress-nginx.json)
+EOF
+
+    # Wait till Grafana pods are ready
+    wait_for_pods_ready "--namespace=grafana"
+}
+
+install_nginx_ingress_controller(){
+    echo -e "\nInstalling NGINX Ingress Controller.\n"
+
+    # Add NGINX chart repository
+    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx &> /dev/null
+    helm repo update &> /dev/null
+
+    # Install NGINX ingress controller
+    helm install ingress-nginx ingress-nginx/ingress-nginx \
+        --version ${NGINX_INGRESS_HELM_VERSION} \
+        --create-namespace \
+        --namespace ingress-nginx \
+        --set controller.kind="Deployment" \
+        --set controller.service.type="LoadBalancer" \
+        --set controller.metrics.enabled=true \
+        --set-string controller.podAnnotations."prometheus\.io/scrape"="true" \
+        --set-string controller.podAnnotations."prometheus\.io/port"="10254" &> /dev/null
+
+    # Wait till NGINX pods are ready
+    wait_for_pods_ready "--namespace=ingress-nginx"
+}
+
+install_cert_manager(){
+    echo -e "\nInstalling cert-manager.\n"
+
+    # Add cert-manager chart repository
+    helm repo add jetstack https://charts.jetstack.io &> /dev/null  
+    helm repo update &> /dev/null
+
+    # Install cert-manager
+    helm install cert-manager jetstack/cert-manager \
+        --version ${CERT_MANAGER_HELM_VERSION} \
+        --namespace cert-manager \
+        --create-namespace \
+        --set clusterResourceNamespace="cert-manager" \
+        --set installCRDs=true &> /dev/null
+
+    # Wait till cert-manager pods are ready
+    wait_for_pods_ready "--namespace=cert-manager"
+
+    # Install cert-manager issuers
+    sed "s|LETSENCRYPT_EMAIL|${LETSENCRYPT_EMAIL}|" resources/manifestscert-manager-cluster-issuers.yaml | \
+        kubectl apply -f - >/dev/null
+}
+
+install_keda(){
+    echo -e "\nInstalling KEDA.\n"
+
+    # Add KEDA chart repository
+    helm repo add kedacore https://kedacore.github.io/charts &> /dev/null  
+    helm repo update &> /dev/null
+
+    # Install KEDA
+    helm install keda kedacore/keda \
+        --version ${KEDA_HELM_VERSION} \
+        --namespace keda \
+        --create-namespace &> /dev/null
+
+    # Wait till KEDA pods are ready
+    wait_for_pods_ready "--namespace=keda"
+}
+
+install_metallb(){
+    echo -e "\nInstalling MetalLB.\n"
+
+    # Get IPv4 of 2 worker nodes
+    # These nodes will be used in MetalLB
+    WORKER_NODE_0_IP=$(terraform -chdir=./terraform output -raw worker_node_0_ip)
+    WORKER_NODE_1_IP=$(terraform -chdir=./terraform output -raw worker_node_1_ip)
+
+    # Add MetalLB chart repository
+    helm repo add metallb https://metallb.github.io/metallb &> /dev/null  
+    helm repo update &> /dev/null
+
+    # Install MetalLB
+    helm install metallb metallb/metallb \
+        --version ${METALLB_HELM_VERSION} \
+        --namespace metallb \
+        --create-namespace \
+        -f - >/dev/null <<EOF
+configInline:
+  address-pools:
+   - name: default
+     protocol: layer2
+     addresses:
+          - ${WORKER_NODE_0_IP}/32
+          - ${WORKER_NODE_1_IP}/32
+EOF
+
+    # Wait till MetalLB pods are ready
+    wait_for_pods_ready "--namespace=metallb"
+}
+
+install_hetzner_csi_driver(){
+    echo -e "\nInstalling Hetzner Cloud CSI driver.\n"
+
+    # Create the secret that contains the Hetzner token for volume creation
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hcloud-csi
+  namespace: kube-system
+stringData:
+  token: "${HCLOUD_CSI_TOKEN}"
+EOF
+
+    # Deploy the CSI driver
+    kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/${HETZNER_CSI_DRIVER_VERSION}/deploy/kubernetes/hcloud-csi.yml &> /dev/null
+
+    # Wait till hcloud CSI pods are ready
+    wait_for_pods_ready "--namespace=kube-system"
+}
+
+install_cluster_autoscaler(){
+    echo -e "\nInstalling cluster-autoscaler.\n"
+
+    # Create the secret that contains the Hetzner token for node creation
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hcloud-autoscaler-api-token
+  namespace: kube-system
+stringData:
+  api_token: "${HCLOUD_NODE_TOKEN}"
+EOF
+
+    # Create the secret that contains the base64 encoded worker manifest for cloud init
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: worker-manifest-base64
+  namespace: kube-system
+stringData:
+  manifest: "$(cat terraform/generated-files/worker.yaml | base64 -w0)"
+EOF
+
+    # Install cluster-autoscaler
+    sed "s|CLUSTER_AUTOSCALER_VERSION|${CLUSTER_AUTOSCALER_VERSION}|" resources/manifestscluster-autoscaler-hetzner.yaml | \
+        kubectl apply -f - >/dev/null
+
+    # Wait till cloud-autoscaler pods are ready
+    wait_for_pods_ready "--namespace=kube-system"
+}
+
+install_external_dns(){
+    echo -e "\nInstalling external-dns.\n"
+
+    # Create external-dns namespace
+    kubectl create namespace external-dns
+
+    # Create the Cloudflare credentials secret
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-credentials
+  namespace: external-dns
+stringData:
+  CF_API_KEY: "${CLOUDFLARE_API_KEY}"
+  CF_API_EMAIL: "${CLOUDFLARE_EMAIL}"
+EOF
+
+    # Install external-dns
+    cat resources/manifestsexternal-dns-cloudflare.yaml | \
+        sed "s|EXTERNAL_DNS_VERSION|${EXTERNAL_DNS_VERSION}|" | \
+        sed "s|CLOUDFLARE_ZONE_ID|${CLOUDFLARE_ZONE_ID}|" | \
+        sed "s|BASE_DOMAIN|${BASE_DOMAIN}|" | \
+        kubectl apply -f - >/dev/null
+
+    # Wait till external-dns pods are ready
+    wait_for_pods_ready "--namespace=external-dns"
+}
+
+wait_for_pods_ready(){
+    # Wait till all pods are ready
+    # This is a workaround for load balanced Kubernetes APIs that timeout too early
+    # $1 -> what to check (kubectl wait options)
+
+    until kubectl wait pods $1 --all=true --for=condition=Ready --timeout=0 &> /dev/null
+    do
+        echo -e "\nWaiting for $1 pods to become ready...\n"
+        sleep 10
+    done
+}
+
+check_existing_cluster_data(){
+    # Check if generated-files folder already exists 
+    # to prevent deleting cluster data by mistake
+    if [ -d terraform/generated-files ]; then
+        echo -e "\nterraform/generated-files already exists. Manually remove it to continue.\n"
+        return 1
+    fi
+
+    # Check if kube/talos configs already exist for a cluster with
+    # this name to prevent deleting cluster data by mistake
+    if [ -f ${HOME}/.kube/${CLUSTER_NAME}.config ] || [ -f ${HOME}/.talos/${CLUSTER_NAME}.config ]; then
+        echo -e "\nCluster configs already exist. Manually remove them to continue.\n"
+        return 1
+    fi
+}
+
+wait_kubernetes_api_available(){
+    echo -e "\nWaiting for Kubernetes API to be available...\n"
+
+    # Wait for Kubernetes API to be available
+    for x in {0..100}; do
+        if curl -s -o /dev/null -I -w "%{http_code}" api.${CLUSTER_NAME}.${BASE_DOMAIN}:6443 | grep 400 &> /dev/null; then
+            echo -e "\nKubernetes API is available.\n"
+            return 0
+        fi
+        echo -e "\nWaiting for Kubernetes API to be available...\n"
+        sleep 10
+    done
+}
+
+wait_talos_ready(){
+    echo -e "\nWaiting for Talos to be ready...\n"
+
+    # Wait for Talos to finish bootstrapping
+    for x in {0..100}; do
+        if talosctl health --talosconfig terraform/generated-files/talosconfig &> /dev/null; then
+            echo -e "\nTalos is ready.\n"
+            return 0
+        fi
+        echo -e "\nWaiting for Talos to be ready...\n"
+        sleep 20
+    done
+}
+
+destroy_all(){
+    # Destroys cluster and removes cluster config files
+    terraform -chdir=./terraform destroy \
+        -auto-approve \
+        -var talos_image_id=$(get_talos_image_id) \
+        -var base_domain=${BASE_DOMAIN} \
+        -var cloudflare_dns_zone_id=${CLOUDFLARE_ZONE_ID} || true &> /dev/null
+    
+    rm -f ${HOME}/{.talos,.kube}/${CLUSTER_NAME}.config
+    rm -rf terraform/generated-files
+}
+
+which() {
+    (alias; declare -f) | /usr/bin/which --read-alias --read-functions --show-tilde --show-dot $@
+}
+
+check_requirement() {
+    req=$1
+    if ! which $req &>/dev/null; then
+        echo -e "\n$req not found in \$PATH. Can't continue.\n" 1>&2
+        return 1
+    fi
+}
+
+main() {
+    # Check for required environment variables
+    for v in HCLOUD_TOKEN  \
+             HCLOUD_CSI_TOKEN \
+             CLUSTER_NAME \
+             BASE_DOMAIN \
+             CLOUDFLARE_ZONE_ID \
+             CLOUDFLARE_EMAIL \
+             CLOUDFLARE_API_KEY \
+             CLOUDFLARE_API_TOKEN; do
+        if [[ -z "${!v-}" ]]; then
+            echo -e "\nYou must set environment variable $v\n" >&2
+            return 1
+        fi
+    done
+
+    # Check for required software
+    reqs=(
+        jq
+        packer
+        terraform
+        talosctl
+        helm
+        kubectl
+    )
+    for req in ${reqs[@]}; do
+        check_requirement $req
+    done
+
+    # Destroy cluster
+    if [ ${destroy} = "true" ]; then
+        destroy_all
+        return 0
+    fi
+
+    # Init Terraform
+    echo -e "\nInitializing Terraform.\n"
+    terraform -chdir=./terraform init &> /dev/null
+
+    # Check if existing data already exists
+    check_existing_cluster_data
+
+    # Create kube and talos config folders
+    mkdir -p -m 700 ${HOME}/{.talos,.kube}
+
+    # Create Talos custom image
+    create_talos_image_if_not_exists
+
+    # Create machine configuration files
+    create_machine_configuration_files
+
+    # Create the servers, load balancer and DNS records
+    create_terraform_resources
+
+    # Bootstrap Talos cluster
+    bootstrap_talos
+
+    # Wait for Kubernetes API to be available
+    wait_kubernetes_api_available
+
+    # Store talosconfig in ${HOME}/.talos/
+    cp terraform/generated-files/talosconfig ${HOME}/.talos/${CLUSTER_NAME}.config &> /dev/null
+    chmod 600 ${HOME}/.talos/${CLUSTER_NAME}.config
+
+    # Store kubeconfig in ${HOME}.kube/
+    cp terraform/generated-files/kubeconfig ${HOME}/.kube/${CLUSTER_NAME}.config &> /dev/null
+    chmod 600 ${HOME}/.kube/${CLUSTER_NAME}.config
+
+    # Set default kube/talos configs to new config files
+    export TALOSCONFIG="${HOME}/.talos/${CLUSTER_NAME}.config"
+    export KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}.config"
+
+    # Wait for the cluster to be healthy and ready
+    wait_talos_ready
+
+    # Install MetalLB
+    install_metallb
+
+    # Install NGINX Ingress Controller
+    install_nginx_ingress_controller
+
+    # Install metrics server
+    install_metrics_server
+
+    # Install external-dns
+    install_external_dns
+
+    # Install Hetzner Cloud CSI driver
+    install_hetzner_csi_driver
+
+    # Install Prometheus
+    install_prometheus
+
+    # Install cert-manager
+    install_cert_manager
+
+    # Install KEDA
+    install_keda
+
+    # Install cluster autoscaler
+    install_cluster_autoscaler
+
+    echo -e "\nTalos cluster is ready.\n"
+}
+
+main $@
+if [ $? -ne 0 ]; then
+    exit 1
+else
+    exit 0
+fi
