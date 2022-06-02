@@ -14,7 +14,6 @@ PROMETHEUS_HELM_VERSION="15.9.0" # https://artifacthub.io/packages/helm/promethe
 GRAFANA_HELM_VERSION="6.29.5" # https://artifacthub.io/packages/helm/grafana/grafana
 CERT_MANAGER_HELM_VERSION="1.8.0" # https://artifacthub.io/packages/helm/cert-manager/cert-manager
 KEDA_HELM_VERSION="2.7.2" # https://artifacthub.io/packages/helm/kedacore/keda
-KEDA_HTTP_ADD_ON_HELM_VERSION="0.3.0" # https://artifacthub.io/packages/helm/kedacore/keda-add-ons-http
 
 # Other resources versions
 CALICO_VERSION="v3.23" # https://projectcalico.docs.tigera.io/reference/installation/api
@@ -184,7 +183,7 @@ ingress:
   enabled: true
   annotations:
     kubernetes.io/ingress.class: "nginx"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
     external-dns.alpha.kubernetes.io/hostname: "grafana.monitoring.${BASE_DOMAIN}"
     external-dns.alpha.kubernetes.io/ttl: "120"
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
@@ -268,11 +267,6 @@ install_keda(){
         --version ${KEDA_HELM_VERSION} \
         --namespace keda \
         --create-namespace &> /dev/null
-
-    # Install KEDA HTTP add-on
-    helm install keda-http-add-on kedacore/keda-add-ons-http \
-        --version ${KEDA_HTTP_ADD_ON_HELM_VERSION} \
-        --namespace keda &> /dev/null
 
     # Wait till KEDA pods are ready
     wait_for_pods_ready "--namespace=keda"

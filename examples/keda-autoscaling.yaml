@@ -45,7 +45,7 @@ metadata:
   namespace: examples
   annotations:
     kubernetes.io/ingress.class: "nginx"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
     # external-dns.alpha.kubernetes.io/hostname: "getting-started.apps.BASE_DOMAIN"
     # external-dns.alpha.kubernetes.io/ttl: "120"
     # external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
@@ -69,7 +69,7 @@ spec:
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: prometheus-scaledobject
+  name: http-requests-cpu-ram-usage
   namespace: examples
   labels:
     deploymentName: getting-started
@@ -77,19 +77,19 @@ spec:
   scaleTargetRef:
     kind: Deployment
     name: getting-started
-  pollingInterval: 30
+  pollingInterval: 5
   minReplicaCount: 0
   maxReplicaCount: 1
   advanced:                                 
-    restoreToOriginalReplicaCount: false    
-    horizontalPodAutoscalerConfig:          
-      behavior:                             
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
         scaleDown:
           stabilizationWindowSeconds: 300
           policies:
           - type: Percent
-            value: 25
-            periodSeconds: 60
+            value: 100
+            periodSeconds: 15
   triggers:
   - type: prometheus
     metadata:
@@ -97,18 +97,9 @@ spec:
       metricName: nginx_ingress_controller_requests
       threshold: '1'
       query: sum(count_over_time(nginx_ingress_controller_requests{ingress="getting-started"}[1m]))
-# With KEDA HTTP-ADD-ON
-# kind: HTTPScaledObject
-# apiVersion: http.keda.sh/v1alpha1
-# metadata:
-#     name: getting-started
-#     namespace: examples
-# spec:
-#     host: getting-started.apps.BASE_DOMAIN
-#     scaleTargetRef:
-#         deployment: getting-started
-#         service: getting-started
-#         port: 80
-#     replicas:
-#         min: 0
-#         max: 5
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus-server.prometheus
+      metricName: container_cpu_load_average_10s
+      threshold: '20'
+      query: sum(container_cpu_load_average_10s{namespace="examples",pod=~"getting-started-.*"})

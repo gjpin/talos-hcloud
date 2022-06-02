@@ -15,7 +15,7 @@ The deployment defaults to a 5 node cluster with 1 load balancer:
 | **Monitoring** | [Metrics server](https://github.com/kubernetes-sigs/metrics-server)<br>[Grafana](https://grafana.com/) with [Prometheus](https://prometheus.io/) datasource and pre-configured dashboards |
 | **Ingress controller** | [NGINX](https://kubernetes.github.io/ingress-nginx/) |
 | **Certificates controller** | [cert-manager](https://cert-manager.io/) with Let's Encrypt staging/production cluster issuers |
-| **Application event-driven autoscaling** | [KEDA](https://keda.sh/) with [HTTP add-on](https://github.com/kedacore/http-add-on) |
+| **Application event-driven autoscaling** | [KEDA](https://keda.sh/) |
 | **Cluster autoscaler** | [cluster-autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) with hcloud provider |
 | **Load balancer** | [MetalLB](https://metallb.universe.tf/) |
 | **External DNS** | [ExternalDNS](https://github.com/kubernetes-sigs/external-dns) with Cloudflare provider |
@@ -107,4 +107,10 @@ sed "s|BASE_DOMAIN|${BASE_DOMAIN}|" examples/keda-autoscaling.yaml | \
 ```
 
 ## Resources
-Original Grafana NGINX ingress [dashboard](https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/grafana/dashboards/nginx.json)
+[KEDA -  Scaling Deployments, StatefulSets & Custom Resources](https://keda.sh/docs/2.7/concepts/scaling-deployments/#scaling-of-deployments-and-statefulsets)
+KEDA scalers - [Prometheus](https://keda.sh/docs/2.7/scalers/prometheus/)
+[Horizontal Pod Autoscaling](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)
+
+Let's Encrypt staging certificates - [Pretend Pear X1](https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem) and [Bogus Broccoli X2](https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x2.pem)
+
+[Grafana NGINX ingress dashboard](https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/grafana/dashboards/nginx.json)
