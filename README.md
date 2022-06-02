@@ -15,7 +15,7 @@ The deployment defaults to a 5 node cluster with 1 load balancer:
 | **Monitoring** | [Metrics server](https://github.com/kubernetes-sigs/metrics-server)<br>[Grafana](https://grafana.com/) with [Prometheus](https://prometheus.io/) datasource and pre-configured dashboards |
 | **Ingress controller** | [NGINX](https://kubernetes.github.io/ingress-nginx/) |
 | **Certificates controller** | [cert-manager](https://cert-manager.io/) with Let's Encrypt staging/production cluster issuers |
-| **Application event-driven autoscaling** | [KEDA](https://keda.sh/) |
+| **Application event-driven autoscaling** | [KEDA](https://keda.sh/) with [HTTP add-on](https://github.com/kedacore/http-add-on) |
 | **Cluster autoscaler** | [cluster-autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) with hcloud provider |
 | **Load balancer** | [MetalLB](https://metallb.universe.tf/) |
 | **External DNS** | [ExternalDNS](https://github.com/kubernetes-sigs/external-dns) with Cloudflare provider |
@@ -100,10 +100,10 @@ Run `./talos-bootstrap`
 ### Run examples:
 ```
 sed "s|BASE_DOMAIN|${BASE_DOMAIN}|" examples/nginx-ingress.yaml | \
-    kubectl apply -f - >/dev/null
+    kubectl apply -f -
 
 sed "s|BASE_DOMAIN|${BASE_DOMAIN}|" examples/keda-autoscaling.yaml | \
-    kubectl apply -f - >/dev/null
+    kubectl apply -f -
 ```
 
 ## Resources
