@@ -1,0 +1,9 @@
+[
+    {
+        "op": "add",
+        "path": "/machine/network/kubespan",
+        "value": {
+            "enabled": true
+          }
+    }
+]

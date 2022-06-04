@@ -73,10 +73,6 @@ create_terraform_resources(){
         -var talos_image_id=$(get_talos_image_id) \
         -var base_domain=${BASE_DOMAIN} \
         -var cloudflare_dns_zone_id=${CLOUDFLARE_ZONE_ID} &> /dev/null
-
-    # Wait for Talos to finish booting
-    echo -e "\nWaiting for Talos to finish booting.\n"
-    sleep 60s
 }
 
 create_machine_configuration_files(){
@@ -84,7 +80,6 @@ create_machine_configuration_files(){
 
     # Create machine configuration files
     talosctl gen config ${CLUSTER_NAME} https://api.${CLUSTER_NAME}.${BASE_DOMAIN}:6443 \
-        --config-patch @resources/talos-patches/disable-ipv6.json \
         --config-patch @resources/talos-patches/set-nameservers.json \
         --config-patch @resources/talos-patches/rotate-server-certificates.json \
         --config-patch-control-plane "$(cat resources/talos-patches/enable-calico.json | sed "s|CALICO_VERSION|${CALICO_VERSION}|")" \
@@ -101,19 +96,31 @@ bootstrap_talos(){
     CONTROL_PLANE_NODE_0_IP=$(terraform -chdir=./terraform output -raw control_plane_node_0_ip)
 
     # Bootstrap the etcd cluster on the first control plane node
-    talosctl config endpoint ${CONTROL_PLANE_NODE_0_IP} \
-        --talosconfig terraform/generated-files/talosconfig
-
-    talosctl config node ${CONTROL_PLANE_NODE_0_IP} \
-        --talosconfig terraform/generated-files/talosconfig
-
-    talosctl bootstrap \
-        --talosconfig=terraform/generated-files/talosconfig
+    while ! talosctl bootstrap \
+        --endpoints "${CONTROL_PLANE_NODE_0_IP}" \
+        --nodes "${CONTROL_PLANE_NODE_0_IP}" \
+        --talosconfig=terraform/generated-files/talosconfig &> /dev/null
+    do
+        echo -e "\nWaiting for Control Plane node 0 to boot...\n"
+        sleep 10s
+    done
 
     # Download the admin kubeconfig from the first control plane node
     talosctl kubeconfig terraform/generated-files \
+        --endpoints "${CONTROL_PLANE_NODE_0_IP}" \
+        --nodes "${CONTROL_PLANE_NODE_0_IP}" \
         --talosconfig=terraform/generated-files/talosconfig \
-        --merge=false
+        --merge=false &> /dev/null
+
+    # Wait for Talos to finish bootstrapping
+    for x in {0..100}; do
+        if talosctl health --talosconfig terraform/generated-files/talosconfig &> /dev/null; then
+            echo -e "\nTalos is ready.\n"
+            return 0
+        fi
+        echo -e "\nWaiting for Talos to be ready...\n"
+        sleep 60
+    done
 }
 
 install_metrics_server(){
@@ -414,20 +421,6 @@ check_existing_cluster_data(){
     fi
 }
 
-wait_talos_ready(){
-    echo -e "\nWaiting for Talos to be ready...\n"
-
-    # Wait for Talos to finish bootstrapping
-    for x in {0..100}; do
-        if talosctl health --talosconfig terraform/generated-files/talosconfig &> /dev/null; then
-            echo -e "\nTalos is ready.\n"
-            return 0
-        fi
-        echo -e "\nWaiting for Talos to be ready...\n"
-        sleep 20
-    done
-}
-
 destroy_all(){
     # Destroys cluster and removes cluster config files
     terraform -chdir=./terraform destroy \
@@ -503,14 +496,11 @@ main() {
     # Create machine configuration files
     create_machine_configuration_files
 
-    # Create the servers, load balancer and DNS records
+    # Create the nodes and DNS records
     create_terraform_resources
 
     # Bootstrap Talos cluster
     bootstrap_talos
-
-    # Wait for the cluster to be healthy and ready
-    wait_talos_ready
 
     # Store talosconfig in ${HOME}/.talos/
     cp terraform/generated-files/talosconfig ${HOME}/.talos/${CLUSTER_NAME}.config &> /dev/null
