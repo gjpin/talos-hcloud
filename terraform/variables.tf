@@ -52,17 +52,6 @@ variable "worker_node_location" {
   default = "nbg1"
 }
 
-# Load balancer types
-variable "control_plane_load_balancer_type" {
-  type    = string
-  default = "lb11"
-}
-
-variable "control_plane_load_balancer_location" {
-  type    = string
-  default = "eu-central"
-}
-
 # DNS
 variable "cloudflare_dns_zone_id" {
   type = string

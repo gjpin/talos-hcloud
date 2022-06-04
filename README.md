@@ -1,10 +1,9 @@
 ## Architecture
 
-The deployment defaults to a 5 node cluster with 1 load balancer:
+The deployment defaults to a 5 node cluster:
 
 - 3x Master servers (CPX21)
 - 2x Worker servers (CPX21)
-- 1x Load balancer for control plane (LB11)
 
 ## Features
 |  Type | Installed |

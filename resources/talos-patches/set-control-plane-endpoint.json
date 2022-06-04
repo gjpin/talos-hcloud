@@ -1,9 +1,0 @@
-[
-    {
-        "op": "add",
-        "path": "/cluster/controlPlane",
-        "value": {
-            "endpoint": "CONTROL_PLANE_ENDPOINT"
-        }
-    }
-]
