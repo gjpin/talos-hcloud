@@ -1,0 +1,12 @@
+[
+    {
+        "op": "add",
+        "path": "/cluster/network/cni",
+        "value": {
+            "name": "custom",
+            "urls": [
+                "https://docs.projectcalico.org/archive/CANAL_VERSION/manifests/canal.yaml"
+            ]
+        }
+    }
+]
