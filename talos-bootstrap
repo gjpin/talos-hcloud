@@ -414,20 +414,6 @@ check_existing_cluster_data(){
     fi
 }
 
-wait_kubernetes_api_available(){
-    echo -e "\nWaiting for Kubernetes API to be available...\n"
-
-    # Wait for Kubernetes API to be available
-    for x in {0..100}; do
-        if curl -s -o /dev/null -I -w "%{http_code}" api.${CLUSTER_NAME}.${BASE_DOMAIN}:6443 | grep 400 &> /dev/null; then
-            echo -e "\nKubernetes API is available.\n"
-            return 0
-        fi
-        echo -e "\nWaiting for Kubernetes API to be available...\n"
-        sleep 10
-    done
-}
-
 wait_talos_ready(){
     echo -e "\nWaiting for Talos to be ready...\n"
 
@@ -523,8 +509,8 @@ main() {
     # Bootstrap Talos cluster
     bootstrap_talos
 
-    # Wait for Kubernetes API to be available
-    wait_kubernetes_api_available
+    # Wait for the cluster to be healthy and ready
+    wait_talos_ready
 
     # Store talosconfig in ${HOME}/.talos/
     cp terraform/generated-files/talosconfig ${HOME}/.talos/${CLUSTER_NAME}.config &> /dev/null
@@ -537,9 +523,6 @@ main() {
     # Set default kube/talos configs to new config files
     export TALOSCONFIG="${HOME}/.talos/${CLUSTER_NAME}.config"
     export KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}.config"
-
-    # Wait for the cluster to be healthy and ready
-    wait_talos_ready
 
     # # Install MetalLB
     # install_metallb
